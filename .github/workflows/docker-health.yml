@@ -22,9 +22,13 @@ on:
       timeout-seconds:
         description: "Total time to wait for a healthy response"
         type: number
-        default: 30
+        default: 60
+      env:
+        description: "Newline-separated KEY=VALUE pairs to pass to the container as environment variables"
+        type: string
+        default: ""
       run-args:
-        description: "Extra arguments passed to docker run (env, volumes, cmd, etc.)"
+        description: "Extra arguments passed to docker run (volumes, cmd, etc.). For env vars prefer the `env` input."
         type: string
         default: ""
 
@@ -50,8 +54,15 @@ jobs:
 
       - name: Start container
         run: |
+          env_args=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && env_args+=(-e "$line")
+          done <<'ENVEOF'
+          ${{ inputs.env }}
+          ENVEOF
           docker run -d --name ci-probe \
             -p ${{ inputs.port }}:${{ inputs.port }} \
+            "${env_args[@]}" \
             ${{ inputs.run-args }} \
             "${{ steps.load.outputs.ref }}"
 

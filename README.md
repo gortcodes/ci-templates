@@ -37,19 +37,22 @@ jobs:
 
 ### Inputs
 
-| Name                | Type    | Default      | Description                                          |
-| ------------------- | ------- | ------------ | ---------------------------------------------------- |
-| `python-version`    | string  | `"3.12"`     | Python version passed to `actions/setup-python`.     |
-| `working-directory` | string  | `"."`        | Directory all steps run from.                        |
-| `test-command`      | string  | `"pytest -q"`| Shell command used to run tests.                     |
-| `lint`              | boolean | `true`       | When true, installs `ruff` and runs `ruff check .`.  |
+| Name                | Type    | Default      | Description                                                      |
+| ------------------- | ------- | ------------ | ---------------------------------------------------------------- |
+| `python-version`    | string  | `"3.12"`     | Python version passed to `actions/setup-python`.                 |
+| `working-directory` | string  | `"."`        | Directory all steps run from.                                    |
+| `test-command`      | string  | `"pytest -q"`| Shell command used to run tests.                                 |
+| `lint`              | boolean | `true`       | When true, installs `ruff` and runs `ruff check .`.              |
+| `dev-extra`         | string  | `"dev"`      | Extra installed when declared in `pyproject.toml`. `""` disables.|
 
 ### Behavior
 
-- **Dependencies:** if `pyproject.toml` exists, runs `pip install ".[dev]"` when
-  a `[project.optional-dependencies.dev]` table is declared, otherwise
-  `pip install .`. Falls back to `pip install -r requirements.txt` if only
-  that file is present. If neither is present, the install step is skipped.
+- **Dependencies:** if `pyproject.toml` exists, runs `pip install ".[<dev-extra>]"`
+  when the named extra is declared under `[project.optional-dependencies]`,
+  otherwise `pip install .`. Defaults to `dev`; set `dev-extra: test` (or any
+  other name) to match your layout, or `""` to always use plain `pip install .`.
+  Falls back to `pip install -r requirements.txt` if only that file is present.
+  If neither is present, the install step is skipped.
 - **Lint:** `ruff` is installed into the job at runtime so callers don't need
   to pin it in their own dev dependencies.
 - **Caching:** pip wheels are cached via `actions/setup-python` using the
@@ -135,22 +138,70 @@ Uses `docker/build-push-action` with `type=gha` layer cache. The artifact is
 kept for 1 day (enough to survive a normal CI run; short enough to not clutter
 storage).
 
+**Pre-build assets (frontends, generated code):** because `docker-build.yml` is
+a reusable workflow, you can't prepend steps to it in the caller. If your
+image needs a built frontend or other generated artifacts, produce them inside
+the Dockerfile using a multi-stage build. Example for an Astro frontend served
+by a Python backend:
+
+```Dockerfile
+FROM node:22-slim AS frontend-build
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+FROM python:3.12-slim
+WORKDIR /app
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install .
+COPY --from=frontend-build /frontend/dist ./frontend/dist
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+This keeps the image self-contained so `docker-build.yml` works on a fresh
+checkout without a prior frontend build step.
+
 ### `docker-health.yml`
 
 Downloads the image artifact, runs the container, and probes an HTTP endpoint.
 Fails the job if the endpoint doesn't return the expected status within the
 timeout.
 
-| Input              | Type    | Default          | Description                                       |
-| ------------------ | ------- | ---------------- | ------------------------------------------------- |
-| `artifact-name`    | string  | `"docker-image"` | Artifact produced by `docker-build.yml`.          |
-| `port`             | string  | `"8080"`         | Container port to publish and probe.              |
-| `path`             | string  | `"/"`            | URL path to probe.                                |
-| `expected-status`  | string  | `"200"`          | Expected HTTP status code.                        |
-| `timeout-seconds`  | number  | `30`             | Total time to wait for a healthy response.        |
-| `run-args`         | string  | `""`             | Extra args passed to `docker run` (env, cmd, …).  |
+| Input              | Type    | Default          | Description                                                 |
+| ------------------ | ------- | ---------------- | ----------------------------------------------------------- |
+| `artifact-name`    | string  | `"docker-image"` | Artifact produced by `docker-build.yml`.                    |
+| `port`             | string  | `"8080"`         | Container port to publish and probe.                        |
+| `path`             | string  | `"/"`            | URL path to probe.                                          |
+| `expected-status`  | string  | `"200"`          | Expected HTTP status code.                                  |
+| `timeout-seconds`  | number  | `60`             | Total time to wait for a healthy response.                  |
+| `env`              | string  | `""`             | Newline-separated `KEY=VALUE` pairs passed as env vars.     |
+| `run-args`         | string  | `""`             | Extra `docker run` args (volumes, cmd, …). Prefer `env`.    |
 
 On failure, the container's logs are printed to the job output before teardown.
+
+**Passing env vars:** use the `env` input with a YAML block scalar. Each non-empty
+line is converted to a `-e KEY=VALUE` flag:
+
+```yaml
+  health:
+    needs: build
+    uses: gortcodes/ci-templates/.github/workflows/docker-health.yml@main
+    with:
+      port: "8000"
+      path: "/healthz"
+      env: |
+        DATABASE_URL=postgres://ci:ci@localhost:5432/ci
+        REDIS_URL=redis://localhost:6379/0
+```
+
+**Required-env gotcha:** if your app validates required env vars at startup
+(crashes the container if they're missing), the healthcheck will fail with a
+timeout because the container never opens the port. Pass dummy values via the
+`env` input so config loads — the health endpoint itself typically doesn't need
+real backing services.
 
 ### `docker-push.yml`
 
