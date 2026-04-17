@@ -1,0 +1,76 @@
+name: Docker Health
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: "Name of the image tarball artifact produced by docker-build.yml"
+        type: string
+        default: "docker-image"
+      port:
+        description: "Container port to publish and probe"
+        type: string
+        default: "8080"
+      path:
+        description: "URL path to probe"
+        type: string
+        default: "/"
+      expected-status:
+        description: "Expected HTTP status code"
+        type: string
+        default: "200"
+      timeout-seconds:
+        description: "Total time to wait for a healthy response"
+        type: number
+        default: 30
+      run-args:
+        description: "Extra arguments passed to docker run (env, volumes, cmd, etc.)"
+        type: string
+        default: ""
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: /tmp
+
+      - name: Load image
+        id: load
+        run: |
+          ref=$(docker load -i /tmp/image.tar | sed -n 's/^Loaded image: //p' | head -n1)
+          if [ -z "$ref" ]; then
+            echo "::error::Could not determine image ref from tarball"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Start container
+        run: |
+          docker run -d --name ci-probe \
+            -p ${{ inputs.port }}:${{ inputs.port }} \
+            ${{ inputs.run-args }} \
+            "${{ steps.load.outputs.ref }}"
+
+      - name: Probe health endpoint
+        run: |
+          url="http://localhost:${{ inputs.port }}${{ inputs.path }}"
+          deadline=$(( $(date +%s) + ${{ inputs.timeout-seconds }} ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$url" || echo "000")
+            if [ "$status" = "${{ inputs.expected-status }}" ]; then
+              echo "Healthy: $url returned $status"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Healthcheck timed out after ${{ inputs.timeout-seconds }}s at $url"
+          docker logs ci-probe || true
+          exit 1
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f ci-probe || true

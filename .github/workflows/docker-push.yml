@@ -1,0 +1,85 @@
+name: Docker Push
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: "Name of the image tarball artifact produced by docker-build.yml"
+        type: string
+        default: "docker-image"
+      image-name:
+        description: "Fully-qualified destination image name (without tag)"
+        type: string
+        default: "ghcr.io/${{ github.repository }}"
+      registry:
+        description: "Registry hostname used for login"
+        type: string
+        default: "ghcr.io"
+      tags:
+        description: "Explicit tag list (newline- or space-separated); overrides metadata-action defaults"
+        type: string
+        default: ""
+    secrets:
+      registry-username:
+        description: "Registry username; defaults to github.actor"
+        required: false
+      registry-password:
+        description: "Registry password or token; defaults to GITHUB_TOKEN"
+        required: false
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: /tmp
+
+      - name: Load image
+        id: load
+        run: |
+          ref=$(docker load -i /tmp/image.tar | sed -n 's/^Loaded image: //p' | head -n1)
+          if [ -z "$ref" ]; then
+            echo "::error::Could not determine image ref from tarball"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ${{ inputs.registry }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ secrets.registry-username || github.actor }}
+          password: ${{ secrets.registry-password || secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.image-name }}
+
+      - name: Tag and push
+        env:
+          SRC: ${{ steps.load.outputs.ref }}
+          OVERRIDE_TAGS: ${{ inputs.tags }}
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          if [ -n "$OVERRIDE_TAGS" ]; then
+            tags="$OVERRIDE_TAGS"
+          else
+            tags="$META_TAGS"
+          fi
+          echo "$tags" | tr ',' '\n' | while read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "Tagging $SRC as $tag"
+            docker tag "$SRC" "$tag"
+            docker push "$tag"
+          done
