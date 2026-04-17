@@ -46,9 +46,10 @@ jobs:
 
 ### Behavior
 
-- **Dependencies:** if `pyproject.toml` exists, runs `pip install .`. Otherwise
-  falls back to `pip install -r requirements.txt`. If neither is present, the
-  install step is skipped.
+- **Dependencies:** if `pyproject.toml` exists, runs `pip install ".[dev]"` when
+  a `[project.optional-dependencies.dev]` table is declared, otherwise
+  `pip install .`. Falls back to `pip install -r requirements.txt` if only
+  that file is present. If neither is present, the install step is skipped.
 - **Lint:** `ruff` is installed into the job at runtime so callers don't need
   to pin it in their own dev dependencies.
 - **Caching:** pip wheels are cached via `actions/setup-python` using the
